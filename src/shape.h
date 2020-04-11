@@ -201,9 +201,12 @@ inline SurfacePoint sample_shape(const Shape &shape, int index, const Vector2 &s
         Vector3{0, 0, 0}, // TODO: compute proper dpdu
         sample, // TODO: give true light source uv
         Vector2{0, 0}, // TODO: inherit derivatives from previous path vertex
-        Vector2{0, 0},
-        Vector3{0, 0, 0} // color
-    }; 
+        Vector2{0, 0}, // du_dxy, dv_dxy
+        Vector3{0, 0, 0}, // dn_dx
+        Vector3{0, 0, 0}, // dn_dy
+        Vector3{0, 0, 0}, // color
+        Vector2{b1, b2}
+    };
 }
 
 DEVICE
@@ -227,8 +230,9 @@ inline void d_sample_shape(const Shape &shape, int index, const Vector2 &sample,
     //     sample,
     //     Vector2{0, 0},
     //     Vector2{0, 0},
-    //     Vector3{0, 0, 0}};
-    // No need to propagate to b1 b2
+    //     Vector3{0, 0, 0},
+    //     Vector2{b1, b2}};
+    // No need to propagate to b1 b2 since they only depend on random numbers
     auto d_v0 = d_point.position;
     auto d_e1 = d_point.position * b1;
     auto d_e2 = d_point.position * b2;
@@ -236,7 +240,7 @@ inline void d_sample_shape(const Shape &shape, int index, const Vector2 &sample,
     d_normalized_n += d_point.shading_frame[2];
     d_coordinate_system(
         normalized_n, d_point.shading_frame[0], d_point.shading_frame[1], d_normalized_n);
-    // auto normalized_n = normalize(n);
+    // normalized_n = normalize(n)
     auto d_n = d_normalize(n, d_normalized_n);
     // n = cross(e1, e2)
     d_cross(e1, e2, d_n, d_e1, d_e2);
@@ -249,95 +253,6 @@ inline void d_sample_shape(const Shape &shape, int index, const Vector2 &sample,
     d_v[0] += d_v0;
     d_v[1] += d_v1;
     d_v[2] += d_v2;
-}
-
-// Derivatives of projection of a point to barycentric coordinate
-// http://gamedev.stackexchange.com/questions/23743/whats-the-most-efficient-way-to-find-barycentric-coordinates
-DEVICE
-inline
-void barycentric(const Vector3 &p0,
-                 const Vector3 &p1,
-                 const Vector3 &p2,
-                 Vector3 &d_b0_d_p,
-                 Vector3 &d_b1_d_p) {
-    auto e1 = p1 - p0;
-    auto e2 = p2 - p0;
-    // auto e0 = p - p0;
-    auto e0_dp = Vector3{1, 1, 1};
-    auto d11 = dot(e1, e1);
-    auto d12 = dot(e1, e2);
-    auto d22 = dot(e2, e2);
-    // auto d01 = dot(e0, e1);
-    auto d01_dp = e0_dp * e1;
-    // auto d02 = dot(e0, e2);
-    auto d02_dp = e0_dp * e2;
-    auto inv_denom = Real(1) / (d11 * d22 - d12 * d12);
-    // auto b0 = (d22 * d01 - d12 * d02) * inv_denom;
-    // auto b1 = (d11 * d02 - d12 * d01) * inv_denom;
-    d_b0_d_p = (d22 * d01_dp - d12 * d02_dp) * inv_denom;
-    d_b1_d_p = (d11 * d02_dp - d12 * d01_dp) * inv_denom;
-}
-
-DEVICE
-inline
-void d_barycentric(const Vector3 &p0,
-                   const Vector3 &p1,
-                   const Vector3 &p2,
-                   const Vector3 &d_d_b0_d_p,
-                   const Vector3 &d_d_b1_d_p,
-                   Vector3 &d_p0,
-                   Vector3 &d_p1,
-                   Vector3 &d_p2) {
-    auto e1 = p1 - p0;
-    auto e2 = p2 - p0;
-    // auto e0 = p - p0;
-    auto e0_dp = Vector3{1, 1, 1};
-    auto d11 = dot(e1, e1);
-    auto d12 = dot(e1, e2);
-    auto d22 = dot(e2, e2);
-    // auto d01 = dot(e0, e1);
-    auto d01_dp = dot(e0_dp, e1);
-    // auto d02 = dot(e0, e2);
-    auto d02_dp = dot(e0_dp, e2);
-    auto inv_denom = Real(1) / (d11 * d22 - d12 * d12);
-    // auto b0 = (d22 * d01 - d12 * d02) * inv_denom;
-    // auto b1 = (d11 * d02 - d12 * d01) * inv_denom;
-
-    // Backprop
-    // d_b0_d_p = (d22 * d01_dp - d12 * d02_dp) * inv_denom
-    auto d_d22 = d_d_b0_d_p * d01_dp * inv_denom;
-    auto d_d01_dp = d_d_b0_d_p * d22 * inv_denom;
-    auto d_d12 = -d_d_b0_d_p * d02_dp * inv_denom;
-    auto d_d02_dp = -d_d_b0_d_p * d12 * inv_denom;
-    auto d_inv_denom = d_d_b0_d_p * (d22 * d01_dp - d12 * d02_dp);
-    // d_b1_d_p = (d11 * d02_dp - d12 * d01_dp) * inv_denom
-    auto d_d11 = d_d_b1_d_p * d02_dp * inv_denom;
-    d_d02_dp += d_d_b1_d_p * d11 * inv_denom;
-    d_d12 += (-d_d_b1_d_p * d01_dp * inv_denom);
-    d_d01_dp += (-d_d_b1_d_p * d12 * inv_denom);
-    d_inv_denom += d_d_b1_d_p * (d11 * d02_dp - d12 * d01_dp);
-    // inv_denom = 1 / (d11 * d22 - d12 * d12)
-    d_d11 += d_inv_denom * (-square(inv_denom) * d22);
-    d_d22 += d_inv_denom * (-square(inv_denom) * d11);
-    d_d12 += d_inv_denom * (2 * square(inv_denom) * d12);
-    // ignore d_e0_dp
-    // d02_dp = dot(e0_dp, e2)
-    auto d_e2 = d_d02_dp * e0_dp;
-    // d01_dp = dot(e0_dp, e1)
-    auto d_e1 = d_d01_dp * e0_dp;
-    // d11 = dot(e1, e1)
-    d_e1 += 2 * d_d11 * e1;
-    // d12 = dot(e1, e2)
-    d_e1 += d_d12 * e2;
-    d_e2 += d_d12 * e1;
-    // d22 = dot(e2, e2)
-    d_e2 += 2 * d_d22 * e2;
-    // e1 = p1 - p0
-    d_p1 += d_e1;
-    d_p0 -= d_e1;
-    // e2 = p2 - p0
-    d_p2 += d_e2;
-    d_p0 -= d_e2;
 }
 
 DEVICE
@@ -462,7 +377,8 @@ inline SurfacePoint intersect_shape(const Shape &shape,
                         dv_dxy,
                         dn_dx,
                         dn_dy,
-                        cc};
+                        cc,
+                        Vector2{u, v}};
 }
 
 DEVICE
@@ -594,10 +510,13 @@ inline void d_intersect_shape(
     //                      dv_dxy,
     //                      dn_dx,
     //                      dn_dy,
-    //                      cc}
+    //                      cc,
+    //                      Vector2{u, v}}
 
     // Backprop
-    auto d_u = Real(0), d_v = Real(0), d_w = Real(0);
+    auto d_u = d_point.barycentric_coordinates.x;
+    auto d_v = d_point.barycentric_coordinates.y;
+    auto d_w = Real(0);
 
     if (has_colors(shape)) {
         auto c0 = get_color(shape, ind[0]);
